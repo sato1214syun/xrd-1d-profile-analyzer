@@ -1,5 +1,5 @@
 from pathlib import Path
-from src.peak_fitting import find_and_fit_peaks, plot_multi_peak_fit
+from src.peak_fitting import find_and_fit_peaks, plot_multi_peak_fit, SplitPseudoVoigtModel
 from src.ras_loader import load_ras_file
 
 if __name__ == "__main__":
@@ -11,7 +11,6 @@ if __name__ == "__main__":
     ras_df = load_ras_file(ras_path)
 
     # GaussianModelで試す（B-splineバックグラウンド込み）
-    from lmfit.models import GaussianModel
 
     ras_x = ras_df["x"].to_numpy()
     ras_y = ras_df["cps"].to_numpy()
@@ -20,7 +19,7 @@ if __name__ == "__main__":
     result_gaussian, peak_indices_gaussian = find_and_fit_peaks(
         ras_x,
         ras_y,
-        GaussianModel,
+        SplitPseudoVoigtModel,
         height=None,
         prominence=None,
         distance=10,

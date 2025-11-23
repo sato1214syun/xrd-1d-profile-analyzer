@@ -1,8 +1,39 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from lmfit import Model
 from lmfit.models import LinearModel, PolynomialModel, SplineModel
 from scipy.signal import find_peaks
 import polars as pl
+
+
+def split_pseudo_voigt(x, amplitude, center, sigma_l, sigma_r, fraction):
+    """
+    Split Pseudo-Voigt function (Amplitude is Peak Height)
+    sigma_l, sigma_r are HWHM
+    """
+    dx = x - center
+    sigma = np.where(dx < 0, sigma_l, sigma_r)
+
+    # Gaussian part (HWHM = sigma)
+    # exp(-ln(2) * (x-c)^2 / sigma^2)
+    G = np.exp(-np.log(2) * (dx / sigma) ** 2)
+
+    # Lorentzian part (HWHM = sigma)
+    # 1 / (1 + (x-c)^2 / sigma^2)
+    L = 1 / (1 + (dx / sigma) ** 2)
+
+    return amplitude * (fraction * L + (1 - fraction) * G)
+
+
+class SplitPseudoVoigtModel(Model):
+    def __init__(self, *args, **kwargs):
+        super().__init__(split_pseudo_voigt, *args, **kwargs)
+        self.set_param_hint("fraction", value=0.5, min=0, max=1)
+        self.set_param_hint("amplitude", min=0)
+        self.set_param_hint("sigma_l", min=0)
+        self.set_param_hint("sigma_r", min=0)
+        # fwhm expression causes issues with prefixes in some lmfit versions
+        # self.set_param_hint("fwhm", expr="sigma_l + sigma_r")
 
 
 def create_background_model(
@@ -71,6 +102,7 @@ def setup_peak_models(
 
         fwhm = abs(x[right_idx] - x[left_idx])
         sigma = fwhm / 2.355
+        hwhm = fwhm / 2.0
 
         params.update(peak_model.make_params())
         params[f"p{i}_amplitude"].set(
@@ -79,7 +111,15 @@ def setup_peak_models(
         params[f"p{i}_center"].set(
             value=center, min=center - fwhm / 2, max=center + fwhm / 2
         )
-        params[f"p{i}_sigma"].set(value=sigma, min=sigma * 0.1, max=sigma * 3)
+
+        if f"p{i}_sigma" in params:
+            params[f"p{i}_sigma"].set(value=sigma, min=sigma * 0.1, max=sigma * 3)
+
+        if f"p{i}_sigma_l" in params:
+            params[f"p{i}_sigma_l"].set(value=hwhm, min=hwhm * 0.1, max=hwhm * 3)
+
+        if f"p{i}_sigma_r" in params:
+            params[f"p{i}_sigma_r"].set(value=hwhm, min=hwhm * 0.1, max=hwhm * 3)
 
         if "fraction" in peak_model.param_names:
             params[f"p{i}_fraction"].set(value=0.5, min=0, max=1)
@@ -360,6 +400,17 @@ def plot_multi_peak_fit(x, y, result, peak_indices):
         fwhm, fwhm_err = get_val_err("fwhm")
         fraction, fraction_err = get_val_err("fraction")
         skew, skew_err = get_val_err("skew")
+        sigma_l, sigma_l_err = get_val_err("sigma_l")
+        sigma_r, sigma_r_err = get_val_err("sigma_r")
+
+        # fwhmが取得できない場合、sigma_lとsigma_rから計算
+        if fwhm is None and sigma_l is not None and sigma_r is not None:
+            fwhm = sigma_l + sigma_r
+            # 誤差伝播 (簡易的: 二乗和の平方根)
+            if sigma_l_err is not None and sigma_r_err is not None:
+                fwhm_err = np.sqrt(sigma_l_err**2 + sigma_r_err**2)
+            else:
+                fwhm_err = None
 
         peak_data.append(
             {
@@ -373,6 +424,10 @@ def plot_multi_peak_fit(x, y, result, peak_indices):
                 "fraction_sigma": fraction_err,
                 "skew": skew,
                 "skew_sigma": skew_err,
+                "sigma_l": sigma_l,
+                "sigma_l_σ": sigma_l_err,
+                "sigma_r": sigma_r,
+                "sigma_r_σ": sigma_r_err,
             }
         )
 
