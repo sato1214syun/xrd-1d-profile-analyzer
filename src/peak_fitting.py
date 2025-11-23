@@ -52,12 +52,23 @@ def setup_peak_models(
 
         # ピーク幅を推定
         half_height = y.min() + amplitude / 2
-        left_idx = peak_idx
-        right_idx = peak_idx
-        while left_idx > 0 and y[left_idx] > half_height:
-            left_idx -= 1
-        while right_idx < len(y) - 1 and y[right_idx] > half_height:
-            right_idx += 1
+
+        # 左側探索: peak_idxより前でhalf_height以下の最後のインデックス
+        left_mask = y[:peak_idx] <= half_height
+        left_indices = np.where(left_mask)[0]
+        if left_indices.size > 0:
+            left_idx = left_indices[-1]
+        else:
+            left_idx = 0
+
+        # 右側探索: peak_idxより後でhalf_height以下の最初のインデックス
+        right_mask = y[peak_idx:] <= half_height
+        right_indices = np.where(right_mask)[0]
+        if right_indices.size > 0:
+            right_idx = peak_idx + right_indices[0]
+        else:
+            right_idx = len(y) - 1
+
         fwhm = abs(x[right_idx] - x[left_idx])
         sigma = fwhm / 2.355
 
