@@ -127,76 +127,119 @@ def wppf_hybrid_thin_film(
         params["bg_slope"].set(value=0)
         params["bg_intercept"].set(value=y.min())
 
+    # WPPFパラメータの追加 (Cagliotiパラメータとゼロシフト、格子歪み)
+    # FWHM^2 = U * tan(theta)^2 + V * tan(theta) + W
+    # theta = 2theta / 2
+    params.add("U", value=0.01, min=0, max=1.0)
+    params.add("V", value=0.01, min=-1.0, max=1.0)
+    params.add("W", value=0.01, min=0, max=1.0)
+    params.add("zero_shift", value=0.0, min=-1.0, max=1.0)
+    params.add("lattice_strain", value=0.0, min=-0.05, max=0.05)
+
     composite_model = background_model
 
-    # マッチしたピークでモデル構築
-    for i, peak_info in enumerate(matched_peaks):
+    # 理論ピークのモデル構築 (Pawley法ライクなアプローチ)
+    # 範囲内のすべての理論ピークを使用
+    x_min, x_max = x.min(), x.max()
+    target_peaks = theoretical_peaks_df.filter(
+        (pl.col("two_theta") >= x_min) & (pl.col("two_theta") <= x_max)
+    )
+
+    print(f"フィッティング対象の理論ピーク数: {len(target_peaks)}")
+
+    for i, row in enumerate(target_peaks.iter_rows(named=True)):
         peak_model = model_class(prefix=f"p{i}_")
         composite_model += peak_model
 
-        exp_pos = peak_info["exp_position"]
-        exp_idx = peak_info["exp_index"]
-        theory_pos = peak_info["theory_position"]
+        theory_pos = row["two_theta"]
 
-        # 実験データから初期パラメータを推定
-        amplitude_guess = y[exp_idx] - y.min()
-
-        # FWHM推定
-        half_height = y.min() + amplitude_guess / 2
-        left_idx = exp_idx
-        right_idx = exp_idx
-        while left_idx > 0 and y[left_idx] > half_height:
-            left_idx -= 1
-        while right_idx < len(y) - 1 and y[right_idx] > half_height:
-            right_idx += 1
-        fwhm = abs(x[right_idx] - x[left_idx])
-        if fwhm < 0.05:
-            fwhm = 0.2
-        sigma = fwhm / 2.355
-
+        # パラメータ設定
         params.update(peak_model.make_params())
 
-        # 実験位置と理論位置の両方を考慮した範囲で制約
-        center_guess = exp_pos
-        center_min = min(exp_pos, theory_pos) - 0.3
-        center_max = max(exp_pos, theory_pos) + 0.3
+        # 中心位置: 格子歪みとゼロシフトを考慮
+        # 2theta_obs = 2 * arcsin( sin(theta_th) / (1 + strain) ) + zero_shift
+        th_rad = theory_pos / 2 * np.pi / 180
+        sin_th = np.sin(th_rad)
 
-        params[f"p{i}_amplitude"].set(
-            value=amplitude_guess, min=0, max=amplitude_guess * 10
+        # lmfitの式として記述 (piはlmfitの数式パーサで利用可能)
+        center_expr = (
+            f"2 * 180 / pi * arcsin({sin_th} / (1 + lattice_strain)) + zero_shift"
         )
-        params[f"p{i}_center"].set(value=center_guess, min=center_min, max=center_max)
-        params[f"p{i}_sigma"].set(value=sigma, min=0.01, max=1.0)
+
+        params[f"p{i}_center"].set(value=theory_pos, expr=center_expr)
+
+        # 幅 (Sigma/FWHM): Caglioti式で拘束
+        # sigma = FWHM / 2.355 (Gaussianの場合)
+        # tan_theta = tan(center / 2 * pi / 180)
+        # FWHM = sqrt(U * tan_theta**2 + V * tan_theta + W)
+
+        # lmfitの式として記述
+        # centerは変数なので、p{i}_centerを使う
+        tan_theta_expr = f"tan(p{i}_center / 2 * pi / 180)"
+        fwhm_expr = f"sqrt(U * {tan_theta_expr}**2 + V * {tan_theta_expr} + W)"
+        sigma_expr = f"{fwhm_expr} / 2.355"
+
+        if f"p{i}_sigma" in params:
+            params[f"p{i}_sigma"].set(expr=sigma_expr)
+
+        # SplitPseudoVoigtなどの場合
+        if f"p{i}_sigma_l" in params:
+            params[f"p{i}_sigma_l"].set(expr=f"{fwhm_expr} / 2")
+        if f"p{i}_sigma_r" in params:
+            params[f"p{i}_sigma_r"].set(expr=f"{fwhm_expr} / 2")
+
+        # 強度: 初期値は実験データから推定、あるいは理論強度を使用
+        # ここではPawley法のように自由パラメータとするが、初期値として理論強度を考慮
+        # 近くに実験ピークがあればその高さを参照
+        closest_exp_idx = (np.abs(x - theory_pos)).argmin()
+        est_height = max(0, y[closest_exp_idx] - y.min())
+        if est_height < 1e-3:
+            est_height = (
+                row.get("relative_intensity", 100) * (y.max() - y.min()) / 1000.0
+            )
+
+        params[f"p{i}_amplitude"].set(value=est_height, min=0)
 
         if "fraction" in peak_model.param_names:
             params[f"p{i}_fraction"].set(value=0.5, min=0, max=1)
 
-    # マッチしなかったピークも追加（基板や不純物の可能性）
-    for i, peak_info in enumerate(unmatched_exp_peaks):
-        j = len(matched_peaks) + i
-        peak_model = model_class(prefix=f"p{j}_")
-        composite_model += peak_model
+    # マッチしなかった実験ピーク（不純物など）も追加
+    # ただし、理論ピークと重複しないもののみ
+    # 判定基準: どの理論ピークからも一定距離以上離れている
+    extra_peak_count = 0
+    for exp_idx, exp_pos in zip(exp_peak_indices, exp_peak_positions):
+        # 理論ピークとの最小距離
+        min_dist = target_peaks.select(
+            (pl.col("two_theta") - exp_pos).abs().min()
+        ).item()
 
-        exp_pos = peak_info["exp_position"]
-        exp_idx = peak_info["exp_index"]
+        if min_dist is None or min_dist > peak_matching_tolerance:
+            # 追加ピークとして扱う
+            j = len(target_peaks) + extra_peak_count
+            peak_model = model_class(prefix=f"p{j}_")
+            composite_model += peak_model
 
-        amplitude_guess = y[exp_idx] - y.min()
-        fwhm = 0.2
-        sigma = fwhm / 2.355
+            amplitude_guess = y[exp_idx] - y.min()
 
-        params.update(peak_model.make_params())
-        params[f"p{j}_amplitude"].set(
-            value=amplitude_guess, min=0, max=amplitude_guess * 10
-        )
-        params[f"p{j}_center"].set(value=exp_pos, min=exp_pos - 0.2, max=exp_pos + 0.2)
-        params[f"p{j}_sigma"].set(value=sigma, min=0.01, max=1.0)
+            params.update(peak_model.make_params())
+            params[f"p{j}_amplitude"].set(value=amplitude_guess, min=0)
+            params[f"p{j}_center"].set(
+                value=exp_pos, min=exp_pos - 0.2, max=exp_pos + 0.2
+            )
 
-        if "fraction" in peak_model.param_names:
-            params[f"p{j}_fraction"].set(value=0.5, min=0, max=1)
+            # 追加ピークはCaglioti拘束を受けない（独立）
+            params[f"p{j}_sigma"].set(value=0.1, min=0.01, max=1.0)
 
-    total_peaks = len(matched_peaks) + len(unmatched_exp_peaks)
-    print(
-        f"\n総ピークモデル数: {total_peaks} (マッチ: {len(matched_peaks)}, 未マッチ: {len(unmatched_exp_peaks)})"
-    )
+            if "fraction" in peak_model.param_names:
+                params[f"p{j}_fraction"].set(value=0.5, min=0, max=1)
+
+            extra_peak_count += 1
+
+    print(f"追加された未同定ピーク数: {extra_peak_count}")
+
+    total_peaks = len(target_peaks) + extra_peak_count
+    print(f"総ピークモデル数: {total_peaks}")
+    print(f"総ピークモデル数: {total_peaks}")
 
     # フィッティング実行
     print("\n=== フィッティング開始 ===")
