@@ -4,54 +4,17 @@ from lmfit.models import LinearModel, PolynomialModel, SplineModel
 from scipy.signal import find_peaks
 
 
-def estimate_background_iterative(x, y, iterations=10, smoothing_window=11):
-    """
-    イテレーティブな方法でバックグラウンドを推定する
-    （ピークを削りながら平滑化を繰り返す）
-
-    Parameters
-    ----------
-    x : array_like
-        x軸のデータ
-    y : array_like
-        y軸のデータ
-    iterations : int
-        イテレーション回数
-    smoothing_window : int
-        平滑化ウィンドウサイズ（奇数）
-
-    Returns
-    -------
-    bg : array_like
-        推定されたバックグラウンド
-    """
-    from scipy.signal import savgol_filter
-
-    bg = np.copy(y)
-    for _ in range(iterations):
-        # 平滑化
-        if smoothing_window > 3:
-            bg = savgol_filter(bg, smoothing_window, 2)
-
-        # 元のデータより大きい部分を元のデータで置き換える（ピークを削る）
-        bg = np.minimum(bg, y)
-
-    return bg
-
-
 def find_and_fit_peaks(
     x,
     y,
     model_class,
     height=None,
-    threshold=None,
     prominence=None,
     distance=None,
     width=None,
     background_type="spline",
     poly_degree=2,
     num_knots=10,
-    delta=3.0,
 ):
     """
     複数のピークを自動検出し、バックグラウンドも含めて同時フィッティングする
@@ -66,8 +29,6 @@ def find_and_fit_peaks(
         使用するモデルクラス (例: GaussianModel, PseudoVoigtModel)
     height : float, optional
         ピーク検出の最小高さ
-    threshold : float, optional
-        隣接するサンプルに対する垂直方向の距離の閾値
     prominence : float, optional
         ピークの突出度（周囲との相対的な高さ）
     distance : int, optional
@@ -82,10 +43,6 @@ def find_and_fit_peaks(
     num_knots : int, optional
         B-splineのノット数（background_type='spline'の場合）
         デフォルト: 10
-    delta : float, optional
-        ピーク検出の閾値係数（δ値）。
-        指定された場合、バックグラウンドを推定して差し引いたデータの標準偏差(σ)を計算し、
-        height = delta * σ 以上のピークを検出する。
 
     Returns
     -------
@@ -94,45 +51,15 @@ def find_and_fit_peaks(
     peak_indices : array
         検出されたピークのインデックス
     """
-    # バックグラウンドを推定して除去（ピーク検出用）
-    bg_estimated = estimate_background_iterative(x, y)
-    detection_y = y - bg_estimated
-
     # デフォルト値の設定
-    if height is None and delta is None:
-        height = (
-            detection_y.max() - detection_y.min()
-        ) * 0.1  # バックグラウンド除去後のデータ範囲の10%
-    if prominence is None and delta is None:
-        prominence = (
-            detection_y.max() - detection_y.min()
-        ) * 0.05  # バックグラウンド除去後のデータ範囲の5%
-
-    # ピーク検出用の閾値を設定
-    detection_height = height
-
-    # deltaが指定された場合、標準偏差に基づいて閾値を設定
-    if delta is not None:
-        # 標準偏差を計算して閾値を設定
-        sigma = np.std(detection_y)
-        detection_height = delta * sigma
-
-        print(f"δ値 ({delta}) を用いてピーク検出を行います（バックグラウンド除去後）")
-        print(f"  バックグラウンド除去後の標準偏差(σ): {sigma:.4f}")
-        print(f"  検出閾値 (δ * σ): {detection_height:.4f}")
-
-        # prominenceはdeltaが指定されている場合はデフォルトでNoneにする
-        if prominence is None:
-            prominence = None
+    if height is None:
+        height = (y.max() - y.min()) * 0.1  # データ範囲の10%
+    if prominence is None:
+        prominence = (y.max() - y.min()) * 0.05  # データ範囲の5%
 
     # ピークを検出
     peak_indices, properties = find_peaks(
-        detection_y,
-        height=detection_height,
-        threshold=threshold,
-        prominence=prominence,
-        distance=distance,
-        width=width,
+        y, height=height, prominence=prominence, distance=distance, width=width
     )
 
     print(f"\n検出されたピーク数: {len(peak_indices)}")
