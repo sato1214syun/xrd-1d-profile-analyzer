@@ -70,37 +70,49 @@ def setup_peak_models(
     composite_model = background_model
     params = bg_params.copy()
 
+    # インデックス配列を作成（補間用）
+    indices_arr = np.arange(len(x))
+
+    # FWHMを一括計算（可能な場合）
+    fwhms = None
+    if "left_ips" in properties and "right_ips" in properties:
+        x_lefts = np.interp(properties["left_ips"], indices_arr, x)
+        x_rights = np.interp(properties["right_ips"], indices_arr, x)
+        fwhms = np.abs(x_rights - x_lefts)
+
     for i, peak_idx in enumerate(peak_indices):
         peak_model = model_class(prefix=f"p{i}_")
         composite_model += peak_model
 
         center = x[peak_idx]
         # propertiesにprominencesがあればそれを使う、なければデータから推定
-        if "prominences" in properties:
-            amplitude = properties["prominences"][i]
-        else:
-            amplitude = y[peak_idx] - y.min()
+        amplitude = (
+            properties["prominences"][i]
+            if "prominences" in properties
+            else y[peak_idx] - y.min()
+        )
 
         # ピーク幅を推定
-        half_height = y.min() + amplitude / 2
-
-        # 左側探索: peak_idxより前でhalf_height以下の最後のインデックス
-        left_mask = y[:peak_idx] <= half_height
-        left_indices = np.where(left_mask)[0]
-        if left_indices.size > 0:
-            left_idx = left_indices[-1]
+        if fwhms is not None:
+            fwhm = fwhms[i]
         else:
-            left_idx = 0
+            # 従来の手動探索（バックアップ）
+            half_height = y.min() + amplitude / 2
 
-        # 右側探索: peak_idxより後でhalf_height以下の最初のインデックス
-        right_mask = y[peak_idx:] <= half_height
-        right_indices = np.where(right_mask)[0]
-        if right_indices.size > 0:
-            right_idx = peak_idx + right_indices[0]
-        else:
-            right_idx = len(y) - 1
+            # 左側探索: peak_idxより前でhalf_height以下の最後のインデックス
+            left_mask = y[:peak_idx] <= half_height
+            left_indices = np.where(left_mask)[0]
+            left_idx = left_indices[-1] if left_indices.size > 0 else 0
 
-        fwhm = abs(x[right_idx] - x[left_idx])
+            # 右側探索: peak_idxより後でhalf_height以下の最初のインデックス
+            right_mask = y[peak_idx:] <= half_height
+            right_indices = np.where(right_mask)[0]
+            right_idx = (
+                peak_idx + right_indices[0] if right_indices.size > 0 else len(y) - 1
+            )
+
+            fwhm = abs(x[right_idx] - x[left_idx])
+
         sigma = fwhm / 2.355
         hwhm = fwhm / 2.0
 
@@ -108,23 +120,19 @@ def setup_peak_models(
         params[f"p{i}_amplitude"].set(
             value=amplitude, min=amplitude / 2, max=amplitude * 1.5
         )
-        params[f"p{i}_center"].set(
-            value=center, min=center - fwhm / 2, max=center + fwhm / 2
-        )
+        params[f"p{i}_center"].set(value=center, min=center - hwhm, max=center + hwhm)
 
-        if f"p{i}_sigma" in params:
-            params[f"p{i}_sigma"].set(value=sigma, min=sigma * 0.1, max=sigma * 3)
+        # Sigma関連のパラメータを一括設定
+        for suffix, val in [("sigma", sigma), ("sigma_l", hwhm), ("sigma_r", hwhm)]:
+            key = f"p{i}_{suffix}"
+            if key in params:
+                params[key].set(value=val, min=val * 0.1, max=val * 3)
 
-        if f"p{i}_sigma_l" in params:
-            params[f"p{i}_sigma_l"].set(value=hwhm, min=hwhm * 0.1, max=hwhm * 3)
-
-        if f"p{i}_sigma_r" in params:
-            params[f"p{i}_sigma_r"].set(value=hwhm, min=hwhm * 0.1, max=hwhm * 3)
-
-        if "fraction" in peak_model.param_names:
-            params[f"p{i}_fraction"].set(value=0.5, min=0, max=1)
-        if "skew" in peak_model.param_names:
-            params[f"p{i}_skew"].set(value=0.0, min=-5, max=5)
+        # その他のオプションパラメータ設定
+        optional_params = {"fraction": (0.5, 0, 1), "skew": (0.0, -5, 5)}
+        for name, (val, min_val, max_val) in optional_params.items():
+            if name in peak_model.param_names:
+                params[f"p{i}_{name}"].set(value=val, min=min_val, max=max_val)
 
     return composite_model, params
 
@@ -421,9 +429,7 @@ def plot_multi_peak_fit(x, y, result, peak_indices):
                 "fwmh[deg]": fwhm,
                 "fwmh_σ[deg]": fwhm_err,
                 "fraction": fraction,
-                "fraction_sigma": fraction_err,
-                "skew": skew,
-                "skew_sigma": skew_err,
+                "fraction_σ": fraction_err,
                 "sigma_l": sigma_l,
                 "sigma_l_σ": sigma_l_err,
                 "sigma_r": sigma_r,
@@ -433,7 +439,8 @@ def plot_multi_peak_fit(x, y, result, peak_indices):
 
     if peak_data:
         df = pl.DataFrame(peak_data)
-        print(df)
+        with pl.Config(tbl_rows=-1, tbl_cols=-1):
+            print(df)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
 
