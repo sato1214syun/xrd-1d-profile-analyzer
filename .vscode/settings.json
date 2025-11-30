@@ -12,6 +12,7 @@
         "monoclinic",
         "Pawley",
         "Voigt",
+        "wppf",
         "xrayutilities"
     ]
 }

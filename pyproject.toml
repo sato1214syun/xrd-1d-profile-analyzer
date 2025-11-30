@@ -11,6 +11,7 @@ dependencies = [
     "plotly>=6.5.0",
     "polars[rtcompat]>=1.35.2",
     "ruff>=0.14.7",
+    "streamlit-nightly>=1.51.1.dev20251129",
     "xrayutilities>=1.7.12",
 ]
 

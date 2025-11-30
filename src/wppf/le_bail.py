@@ -227,5 +227,6 @@ class LeBailFitter(WPPFBase):
         result.r_exp = r_exp
         result.gof = gof
         result.peak_stats = self.get_peak_stats(result.params)
+        result.best_fit = y_calc
 
         return result
