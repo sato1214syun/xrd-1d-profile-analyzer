@@ -6,7 +6,7 @@ from src.ras_loader import load_ras_file
 if __name__ == "__main__":
     # RASファイルのパスを指定
     ras_path = Path(
-        r"data\XRD_profiles\XRD\250915_XRD_PB_ID_43_44\ID44_PB_基板加熱100度_高真空_2000W.ras"
+        r"data\XRD_profiles\XRD\250915_XRD_PB_ID_43_44\ID43_PB_合金Tiシード10nm_2000W.ras"
     )
 
     ras_df, _ = load_ras_file(ras_path)

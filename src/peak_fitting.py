@@ -1,14 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from lmfit import Model
-from lmfit.models import LinearModel, PolynomialModel, SplineModel
-from scipy.signal import find_peaks
 import polars as pl
-
-try:
-    from .peak_models import SplitPseudoVoigtModel, split_pseudo_voigt
-except ImportError:
-    from peak_models import SplitPseudoVoigtModel, split_pseudo_voigt
+from lmfit.models import LinearModel, PolynomialModel, SplineModel
+from scipy.signal import find_peaks, peak_widths
 
 
 def create_background_model(
