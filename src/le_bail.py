@@ -6,6 +6,10 @@ import xrayutilities as xu
 from lmfit import Minimizer, Parameters
 from lmfit.models import SplineModel
 
+try:
+    from .peak_models import split_pseudo_voigt
+except ImportError:
+    from peak_models import split_pseudo_voigt
 
 
 class LeBailFitter:
@@ -450,29 +454,26 @@ class LeBailFitter:
             sigma_l = hwhm * (1 - asymmetry)
             sigma_r = hwhm * (1 + asymmetry)
 
-            # Use the split_pseudo_voigt function from peak_fitting module logic
-            # Re-implementing here for speed inside the loop or using the Model class?
-            # Using the function directly is faster than creating Model objects
+            # Use the split_pseudo_voigt function from peak_fitting module
+            # This avoids code duplication and ensures consistency
 
-            dx = self.x - two_theta
             # Optimization: only calculate near peak
+            dx = self.x - two_theta
             mask = np.abs(dx) < fwhm * 10
             if not np.any(mask):
                 continue
 
-            dx_masked = dx[mask]
-
-            # Split Pseudo-Voigt Calculation
-            # sigma depends on side
-            sigma_vec = np.where(dx_masked < 0, sigma_l, sigma_r)
-
-            # Gaussian part
-            G = np.exp(-np.log(2) * (dx_masked / sigma_vec) ** 2)
-
-            # Lorentzian part
-            L = 1.0 / (1.0 + (dx_masked / sigma_vec) ** 2)
-
-            peak_shape = eta * L + (1 - eta) * G
+            # Calculate peak shape using the imported function
+            # Note: split_pseudo_voigt takes (x, amplitude, center, sigma_l, sigma_r, fraction)
+            # Here amplitude=1.0 because we multiply by intensity later
+            peak_shape = split_pseudo_voigt(
+                self.x[mask],
+                amplitude=1.0,
+                center=two_theta,
+                sigma_l=sigma_l,
+                sigma_r=sigma_r,
+                fraction=eta,
+            )
 
             y_calc[mask] += intensity * peak_shape
 
@@ -589,11 +590,15 @@ class LeBailFitter:
             if not np.any(mask):
                 continue
 
-            dx_masked = dx[mask]
-            sigma_vec = np.where(dx_masked < 0, sigma_l, sigma_r)
-            G = np.exp(-np.log(2) * (dx_masked / sigma_vec) ** 2)
-            L = 1.0 / (1.0 + (dx_masked / sigma_vec) ** 2)
-            peak_shape = eta * L + (1 - eta) * G
+            # Use shared function
+            peak_shape = split_pseudo_voigt(
+                self.x[mask],
+                amplitude=1.0,
+                center=two_theta,
+                sigma_l=sigma_l,
+                sigma_r=sigma_r,
+                fraction=eta,
+            )
 
             # Le Bail Extraction Formula
             # I_new = Sum_i [ (y_obs(i) - y_bkg(i)) * (y_calc_k(i) / y_calc_peaks_total(i)) ]

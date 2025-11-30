@@ -1,5 +1,6 @@
 from pathlib import Path
-from src.peak_fitting import find_and_fit_peaks, plot_multi_peak_fit, SplitPseudoVoigtModel
+from src.peak_fitting import find_and_fit_peaks, plot_multi_peak_fit
+from src.peak_models import SplitPseudoVoigtModel
 from src.ras_loader import load_ras_file
 
 if __name__ == "__main__":
