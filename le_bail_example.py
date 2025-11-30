@@ -1,6 +1,5 @@
 import sys
 from pathlib import Path
-import matplotlib.pyplot as plt
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent / "src"))
@@ -35,8 +34,14 @@ def main():
     result = fitter.fit(max_nfev=2000)
 
     print("Fit Complete.")
-    print(f"Chi2: {result.chisqr}")
-    print(f"RedChi: {result.redchi}")
+    print(f"Chi2: {result.chisqr:.2f}")
+    print(f"RedChi: {result.redchi:.2f}")
+
+    if hasattr(result, "r_wp"):
+        print(f"R_wp: {result.r_wp:.2f}%")
+        print(f"R_p:  {result.r_p:.2f}%")
+        print(f"R_exp:{result.r_exp:.2f}%")
+        print(f"GoF:  {result.gof:.2f}")
 
     # Print Lattice Params
     print("\nLattice Parameters:")

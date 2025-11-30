@@ -54,6 +54,44 @@ class LeBailFitter:
         self.reflections = self._generate_reflections()
         print(f"Generated {len(self.reflections)} unique reflections.")
 
+        # Estimate Lattice Parameter from Strongest Peak (Cubic only for now)
+        if self.lattice.crystal_system.lower() == "cubic":
+            self._estimate_cubic_lattice()
+
+    def _estimate_cubic_lattice(self):
+        """Estimate cubic lattice parameter 'a' from the strongest observed peak."""
+        # Find 2theta of max intensity
+        idx_max = np.argmax(self.y)
+        two_theta_max = self.x[idx_max]
+
+        # Assume strongest peak is (110) for BCC (Im-3m)
+        # Check space group or just assume (110) as it's usually the first strong one
+        # For NbTi (Im-3m), (110) is the first allowed reflection.
+
+        # Calculate d-spacing
+        # lambda = 2d sin(theta) -> d = lambda / (2 sin(theta))
+        theta_rad = np.radians(two_theta_max / 2)
+        d_spacing = self.wavelength_val / (2 * np.sin(theta_rad))
+
+        # For (110): d = a / sqrt(1^2 + 1^2 + 0^2) = a / sqrt(2)
+        # a = d * sqrt(2)
+        a_est = d_spacing * np.sqrt(2)
+
+        print(
+            f"Estimated lattice parameter 'a' from max peak at {two_theta_max:.2f} deg: {a_est:.4f} A"
+        )
+
+        # Update lattice object
+        # For cubic, setting 'a' automatically updates 'b' and 'c' if they are constrained
+        self.lattice.a = a_est
+        # self.lattice.b = a_est # Error: b is not free
+        # self.lattice.c = a_est # Error: c is not free
+
+        # Re-generate reflections because Q might change significantly?
+        # Actually, indices don't change for cubic, but Q values do.
+        # We should re-generate to be safe, especially if ordering changes (unlikely for cubic).
+        self.reflections = self._generate_reflections()
+
     def _generate_reflections(self):
         """Generate unique reflections (HKL groups) for the measured range."""
         q_max = 4 * np.pi / self.wavelength_val * np.sin(np.radians(self.x.max() / 2))
@@ -187,18 +225,24 @@ class LeBailFitter:
         # Profile Parameters (Caglioti)
         # FWHM^2 = U tan^2(th) + V tan(th) + W
         # Relaxed constraints and larger initial values
-        params.add("U", value=0.1, min=0.0, max=2.0)
+        # Increased initial W to ensure peak overlap during initial refinement
+        # Reduced max U to prevent excessive broadening at high angles
+        params.add("U", value=0.1, min=0.0, max=0.5)
         params.add("V", value=0.0, min=-1.0, max=1.0)
-        params.add("W", value=0.1, min=0.001, max=1.0)
+        params.add("W", value=0.5, min=0.001, max=2.0)
 
         # Peak Shape (Pseudo-Voigt mixing)
-        params.add("eta", value=0.5, min=0.0, max=1.0)
+        # eta = eta_0 + eta_1 * 2theta
+        params.add("eta_0", value=0.5, min=0.0, max=1.0)
+        params.add("eta_1", value=0.0, min=-0.01, max=0.01, vary=False)
 
         # Asymmetry
         params.add("asymmetry", value=0.0, min=-1, max=1)
 
-        # Zero shift
-        params.add("zero_shift", value=0.0, min=-0.5, max=0.5)
+        # Zero shift & Displacement
+        # Increased bounds for zero_shift to handle larger offsets
+        params.add("zero_shift", value=0.0, min=-2.0, max=2.0)
+        params.add("displacement", value=0.0, min=-2.0, max=2.0, vary=False)
 
         # Background
         if self.background_type == "linear":
@@ -218,10 +262,32 @@ class LeBailFitter:
 
         # Intensities (Le Bail parameters)
         # One per reflection group
-        # In Le Bail method, intensities are not refined by least-squares but extracted iteratively.
-        # So we set vary=False initially.
+        # Estimate initial intensity from observed data at the approximate peak position
+        # This prevents "intensity starvation" for strong peaks if they start too small
+        max_intensity = self.y.max()
+
+        # Temporary lattice for position estimation
+        a_init = lat.a
+        b_init = lat.b
+        c_init = lat.c
+
         for i, ref in enumerate(self.reflections):
-            params.add(f"I_{i}", value=100.0, min=0.0, vary=False)
+            hkl = ref["hkl_rep"]
+            # Estimate position
+            two_theta = self._calculate_2theta(
+                hkl, a_init, b_init, c_init, lat.alpha, lat.beta, lat.gamma
+            )
+
+            # Find nearest observed intensity
+            idx = (np.abs(self.x - two_theta)).argmin()
+            estimated_I = self.y[idx]
+
+            # Ensure it's not too small (background level) or too large
+            if estimated_I < max_intensity * 0.01:
+                estimated_I = max_intensity * 0.01
+
+            # Set initial value. Note: I_i is peak height in our model, so this is a good guess.
+            params.add(f"I_{i}", value=estimated_I, min=0.0, vary=False)
 
         return params
 
@@ -238,9 +304,14 @@ class LeBailFitter:
         U = params["U"].value
         V = params["V"].value
         W = params["W"].value
-        eta = params["eta"].value
+
+        # Mixing parameter
+        eta_0 = params["eta_0"].value
+        eta_1 = params["eta_1"].value
+
         asymmetry = params["asymmetry"].value
         zero = params["zero_shift"].value
+        displacement = params["displacement"].value
 
         y_calc = np.zeros_like(self.x)
 
@@ -276,8 +347,15 @@ class LeBailFitter:
             hkl = ref["hkl_rep"]
 
             # Calculate position
-            two_theta = self._calculate_2theta(hkl, a, b, c, alpha, beta, gamma)
-            two_theta += zero
+            two_theta_orig = self._calculate_2theta(hkl, a, b, c, alpha, beta, gamma)
+
+            # Apply Zero Shift and Displacement
+            # Displacement shift: delta(2theta) = displacement * cos(theta)
+            # Note: displacement parameter absorbs the -2s/R factor
+            theta_rad_orig = np.radians(two_theta_orig / 2.0)
+            disp_shift = displacement * np.cos(theta_rad_orig)
+
+            two_theta = two_theta_orig + zero + disp_shift
 
             if two_theta < self.x.min() - 1 or two_theta > self.x.max() + 1:
                 continue
@@ -290,6 +368,13 @@ class LeBailFitter:
             if fwhm_sq < 1e-6:
                 fwhm_sq = 1e-6
             fwhm = np.sqrt(fwhm_sq)
+
+            # Calculate Eta (Mixing)
+            eta = eta_0 + eta_1 * two_theta
+            if eta > 1.0:
+                eta = 1.0
+            if eta < 0.0:
+                eta = 0.0
 
             # Split Pseudo-Voigt parameters
             # sigma_l and sigma_r are HWHM
@@ -387,9 +472,13 @@ class LeBailFitter:
         U = params["U"].value
         V = params["V"].value
         W = params["W"].value
-        eta = params["eta"].value
+
+        eta_0 = params["eta_0"].value
+        eta_1 = params["eta_1"].value
+
         asymmetry = params["asymmetry"].value
         zero = params["zero_shift"].value
+        displacement = params["displacement"].value
 
         for i, ref in enumerate(self.reflections):
             old_intensity = params[f"I_{i}"].value
@@ -399,8 +488,12 @@ class LeBailFitter:
             # So we need to be careful. If we start with non-zero, it's fine.
 
             hkl = ref["hkl_rep"]
-            two_theta = self._calculate_2theta(hkl, a, b, c, alpha, beta, gamma)
-            two_theta += zero
+
+            # Calculate position with displacement
+            two_theta_orig = self._calculate_2theta(hkl, a, b, c, alpha, beta, gamma)
+            theta_rad_orig = np.radians(two_theta_orig / 2.0)
+            disp_shift = displacement * np.cos(theta_rad_orig)
+            two_theta = two_theta_orig + zero + disp_shift
 
             if two_theta < self.x.min() - 1 or two_theta > self.x.max() + 1:
                 continue
@@ -411,6 +504,13 @@ class LeBailFitter:
             if fwhm_sq < 1e-6:
                 fwhm_sq = 1e-6
             fwhm = np.sqrt(fwhm_sq)
+
+            # Calculate Eta
+            eta = eta_0 + eta_1 * two_theta
+            if eta > 1.0:
+                eta = 1.0
+            if eta < 0.0:
+                eta = 0.0
 
             hwhm = fwhm / 2.0
             sigma_l = hwhm * (1 - asymmetry)
@@ -445,8 +545,17 @@ class LeBailFitter:
                 new_intensity = 0
             params[f"I_{i}"].value = new_intensity
 
-    def fit(self, max_nfev=1000, le_bail_cycles=10):
+    def fit(self, max_nfev=1000, le_bail_cycles=20):
         params = self.make_params()
+
+        # Initial Strategy: Fix Zero Shift and Displacement to ensure Lattice Parameter converges first
+        # This prevents the solver from using large zero shifts to fit the first peak while ignoring others.
+        params["zero_shift"].set(vary=False, value=0.0)
+        params["displacement"].set(vary=False, value=0.0)
+
+        # Weights: 1/sqrt(y) (Poisson statistics)
+        # Avoid division by zero
+        weights = 1.0 / np.sqrt(np.maximum(self.y, 1.0))
 
         # Handle Spline Background
         if self.background_type == "spline":
@@ -457,15 +566,60 @@ class LeBailFitter:
             bg_params = self.bg_model.guess(self.y, x=self.x)
             params.update(bg_params)
 
-        minner = Minimizer(self.residual, params)
+        # Pass weights to Minimizer?
+        # Minimizer(residual, params, fcn_args=..., fcn_kws=...)
+        # But residual() takes only params.
+        # We can modify residual to use weights if we pass them, but simpler to just use them in residual.
+        # But residual signature is fixed to (params, *args, **kws).
+        # Let's store weights in self.
+        self.weights = weights
+
+        # Define residual with weights
+        def weighted_residual(params):
+            res = self.residual(params)
+            return res * self.weights
+
+        minner = Minimizer(weighted_residual, params)
 
         # Le Bail Iteration Loop
         print(f"Starting Le Bail refinement with {le_bail_cycles} cycles...")
 
         for cycle in range(le_bail_cycles):
+            # Gradual Parameter Release Strategy
+
+            # Cycle 0-2: Fix Width to prevent collapse, Refine Lattice only
+            if cycle == 0:
+                params["U"].set(vary=False)
+                params["V"].set(vary=False)
+                params["W"].set(vary=False)
+                print("  -> Fixing Width parameters for initial lattice refinement")
+
+            if cycle == 3:
+                params["U"].set(vary=True)
+                params["V"].set(vary=True)
+                params["W"].set(vary=True)
+                print("  -> Releasing Width parameters")
+
+            if cycle == 5:
+                # Enable Zero Shift (and Displacement if applicable)
+                # Once lattice is roughly correct, we can allow small shifts
+                params["zero_shift"].set(vary=True)
+                print("  -> Enabling Zero Shift refinement")
+
+                # Enable Asymmetry
+                params["asymmetry"].set(vary=True)
+                print("  -> Enabling Asymmetry refinement")
+
+            if cycle == 10:
+                # Enable Displacement if enough peaks (heuristic)
+                # Even with few peaks, if we have high angle data, displacement is better than zero shift alone
+                if len(self.reflections) >= 3:
+                    params["displacement"].set(vary=True)
+                    print("  -> Enabling Displacement refinement")
+                else:
+                    print("  -> Skipping Displacement (too few reflections)")
+
             # 1. Refine Geometry & Profile (Intensities Fixed)
-            # We use fewer steps per cycle to speed up
-            # IMPORTANT: Pass the current params to minimize so it uses updated intensities and geometry
             result = minner.minimize(
                 method="leastsq", params=params, max_nfev=max_nfev // le_bail_cycles
             )
@@ -478,9 +632,41 @@ class LeBailFitter:
 
         # Final refinement
         result = minner.minimize(method="leastsq", params=params, max_nfev=max_nfev)
+
+        # Calculate R-factors
+        y_calc = self.model(result.params)
+        if self.background_type == "spline" and hasattr(self, "bg_model"):
+            y_calc += self.bg_model.eval(result.params, x=self.x)
+
+        # R_wp (Weighted Profile R-factor)
+        # Numerator is essentially Chi2 (unreduced)
+        numerator_wp = np.sum((self.weights * (self.y - y_calc)) ** 2)
+        denominator_wp = np.sum((self.weights * self.y) ** 2)
+        r_wp = np.sqrt(numerator_wp / denominator_wp) * 100
+
+        # R_p (Profile R-factor)
+        numerator_p = np.sum(np.abs(self.y - y_calc))
+        denominator_p = np.sum(self.y)
+        r_p = (numerator_p / denominator_p) * 100
+
+        # R_exp (Expected R-factor)
+        # R_exp = sqrt( (N - P) / Sum(w * y_obs^2) )
+        # N = number of points, P = number of free parameters
+        n_free = result.nfree
+        r_exp = np.sqrt(n_free / denominator_wp) * 100
+
+        # Goodness of Fit (S)
+        gof = r_wp / r_exp
+
+        # Attach to result object
+        result.r_wp = r_wp
+        result.r_p = r_p
+        result.r_exp = r_exp
+        result.gof = gof
+
         return result
 
-    def plot_result(self, result):
+    def plot_result(self, result, save_path="data/Figure_1.png"):
         y_calc = self.model(result.params)
 
         if self.background_type == "spline" and hasattr(self, "bg_model"):
@@ -494,4 +680,5 @@ class LeBailFitter:
         plt.xlabel("2Theta")
         plt.ylabel("Intensity")
         plt.title("Le Bail / Pawley Fit Result")
-        plt.show()
+        plt.savefig(save_path)
+        plt.close()
