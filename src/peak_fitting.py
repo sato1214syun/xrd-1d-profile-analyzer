@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 from lmfit.models import LinearModel, PolynomialModel, SplineModel
-from scipy.signal import find_peaks, peak_widths
+from scipy.signal import find_peaks
 
 
 def create_background_model(
