@@ -3,16 +3,15 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import xrayutilities as xu
-from lmfit import Minimizer, Parameters
-from lmfit.models import SplineModel
+from lmfit import Parameters
 
 try:
-    from .peak_models import split_pseudo_voigt
+    from ..peak_models import split_pseudo_voigt
 except ImportError:
     from peak_models import split_pseudo_voigt
 
 
-class LeBailFitter:
+class WPPFBase:
     def __init__(
         self,
         x,
@@ -23,7 +22,7 @@ class LeBailFitter:
         num_knots=10,
     ):
         """
-        Le Bail / Pawley fitting class.
+        Base class for Whole Powder Pattern Fitting (WPPF).
 
         Parameters
         ----------
@@ -299,7 +298,7 @@ class LeBailFitter:
         # Increased initial W to ensure peak overlap during initial refinement
         # Reduced max U to prevent excessive broadening at high angles
         params.add("U", value=0.1, min=0.0, max=5.0)
-        params.add("V", value=0.0, min=-2.0, max=2.0)
+        params.add("V", value=0.0, min=-1.0, max=1.0)
         params.add("W", value=0.5, min=0.001, max=5.0)
 
         # Peak Shape (Pseudo-Voigt mixing)
@@ -312,8 +311,8 @@ class LeBailFitter:
 
         # Zero shift & Displacement
         # Increased bounds for zero_shift to handle larger offsets
-        params.add("zero_shift", value=0.0, min=-2.0, max=2.0)
-        params.add("displacement", value=0.0, min=-2.0, max=2.0, vary=False)
+        params.add("zero_shift", value=0.0, min=-0.5, max=0.5)
+        params.add("displacement", value=0.0, min=-0.5, max=0.5, vary=False)
 
         # Background
         if self.background_type == "linear":
@@ -495,270 +494,6 @@ class LeBailFitter:
 
         return res
 
-    def _update_intensities(self, params):
-        """
-        Perform one cycle of Le Bail intensity extraction.
-        I_new = Sum_i [ (y_obs(i) - y_bkg(i)) * (y_calc_k(i) / y_calc_peaks_total(i)) ]
-        """
-        # 1. Calculate Background
-        # Create params with 0 intensity to get background only
-        params_bkg = params.copy()
-        for i in range(len(self.reflections)):
-            params_bkg[f"I_{i}"].value = 0.0
-
-        y_bkg = self.model(params_bkg)
-        if self.background_type == "spline" and hasattr(self, "bg_model"):
-            y_bkg += self.bg_model.eval(params, x=self.x)
-
-        # 2. Calculate Total Calculated Profile
-        y_calc_total = self.model(params)
-        if self.background_type == "spline" and hasattr(self, "bg_model"):
-            y_calc_total += self.bg_model.eval(params, x=self.x)
-
-        y_peaks_total = y_calc_total - y_bkg
-
-        # Avoid division by zero
-        # If y_peaks_total is very small, the ratio is unstable.
-        # We can set a threshold.
-        mask_nonzero = y_peaks_total > 1e-6
-
-        ratio = np.zeros_like(self.x)
-        ratio[mask_nonzero] = (
-            self.y[mask_nonzero] - y_bkg[mask_nonzero]
-        ) / y_peaks_total[mask_nonzero]
-
-        # 3. Iterate over peaks and update intensities
-        # We need to recalculate peak shapes.
-        # This duplicates logic from model(), but we need individual components.
-
-        a = params["a"].value
-        b = params["b"].value
-        c = params["c"].value
-        alpha = params["alpha"].value
-        beta = params["beta"].value
-        gamma = params["gamma"].value
-
-        U = params["U"].value
-        V = params["V"].value
-        W = params["W"].value
-
-        eta_0 = params["eta_0"].value
-        eta_1 = params["eta_1"].value
-
-        asymmetry = params["asymmetry"].value
-        zero = params["zero_shift"].value
-        displacement = params["displacement"].value
-
-        for i, ref in enumerate(self.reflections):
-            old_intensity = params[f"I_{i}"].value
-
-            # If intensity is effectively zero, it might stay zero, but Le Bail allows it to grow
-            # if there is observed intensity. However, if old_intensity is 0, y_calc_k is 0.
-            # So we need to be careful. If we start with non-zero, it's fine.
-
-            hkl = ref["hkl_rep"]
-
-            # Calculate position with displacement
-            two_theta_orig = self._calculate_2theta(hkl, a, b, c, alpha, beta, gamma)
-            theta_rad_orig = np.radians(two_theta_orig / 2.0)
-            disp_shift = displacement * np.cos(theta_rad_orig)
-            two_theta = two_theta_orig + zero + disp_shift
-
-            if two_theta < self.x.min() - 1 or two_theta > self.x.max() + 1:
-                continue
-
-            theta_rad = np.radians(two_theta / 2)
-            tan_theta = np.tan(theta_rad)
-            fwhm_sq = U * tan_theta**2 + V * tan_theta + W
-            if fwhm_sq < 1e-6:
-                fwhm_sq = 1e-6
-            fwhm = np.sqrt(fwhm_sq)
-
-            # Calculate Eta
-            eta = eta_0 + eta_1 * two_theta
-            if eta > 1.0:
-                eta = 1.0
-            if eta < 0.0:
-                eta = 0.0
-
-            hwhm = fwhm / 2.0
-            sigma_l = hwhm * (1 - asymmetry)
-            sigma_r = hwhm * (1 + asymmetry)
-
-            dx = self.x - two_theta
-            mask = np.abs(dx) < fwhm * 10
-            if not np.any(mask):
-                continue
-
-            # Use shared function
-            peak_shape = split_pseudo_voigt(
-                self.x[mask],
-                amplitude=1.0,
-                center=two_theta,
-                sigma_l=sigma_l,
-                sigma_r=sigma_r,
-                fraction=eta,
-            )
-
-            # Le Bail Extraction Formula
-            # I_new = Sum_i [ (y_obs(i) - y_bkg(i)) * (y_calc_k(i) / y_calc_peaks_total(i)) ]
-            # Here, y_calc_k(i) = old_intensity * peak_shape(i)
-            # So, I_new = old_intensity * Sum_i [ peak_shape(i) * ratio(i) ]
-
-            # This I_new is the "Integrated Intensity" (Area) of the peak.
-            # However, our model parameter I_i is defined as the "Peak Height" (scaling factor of peak_shape).
-            # So we need to convert the extracted Area back to Height.
-
-            sum_term = np.sum(ratio[mask] * peak_shape)
-            extracted_area = old_intensity * sum_term
-
-            # Convert Area to Height
-            # Area = Height * Integral(peak_shape)
-            # Height = Area / Integral(peak_shape)
-            shape_integral = np.sum(peak_shape)
-
-            if shape_integral > 1e-9:
-                new_intensity = extracted_area / shape_integral
-            else:
-                new_intensity = 0.0
-
-            # Damping factor to prevent oscillation
-            # I_updated = alpha * I_new + (1 - alpha) * I_old
-            # Reduced alpha to 0.5 to stabilize intensity extraction
-            alpha = 0.5
-            new_intensity = alpha * new_intensity + (1 - alpha) * old_intensity
-
-            # Update parameter
-            if new_intensity < 0:
-                new_intensity = 0
-            params[f"I_{i}"].value = new_intensity
-
-    def fit(self, max_nfev=1000, le_bail_cycles=50):
-        params = self.make_params()
-
-        # Initial Strategy: Fix Zero Shift and Displacement to ensure Lattice Parameter converges first
-        # This prevents the solver from using large zero shifts to fit the first peak while ignoring others.
-        params["zero_shift"].set(vary=False, value=0.0)
-        params["displacement"].set(vary=False, value=0.0)
-
-        # Weights: 1/sqrt(y) (Poisson statistics)
-        # Avoid division by zero
-        weights = 1.0 / np.sqrt(np.maximum(self.y, 1.0))
-
-        # Handle Spline Background
-        if self.background_type == "spline":
-            knot_positions = np.linspace(
-                self.x.min(), self.x.max(), self.num_knots + 2
-            )[1:-1]
-            self.bg_model = SplineModel(prefix="bg_", xknots=knot_positions)
-            bg_params = self.bg_model.guess(self.y, x=self.x)
-            params.update(bg_params)
-
-        # Pass weights to Minimizer?
-        # Minimizer(residual, params, fcn_args=..., fcn_kws=...)
-        # But residual() takes only params.
-        # We can modify residual to use weights if we pass them, but simpler to just use them in residual.
-        # But residual signature is fixed to (params, *args, **kws).
-        # Let's store weights in self.
-        self.weights = weights
-
-        # Define residual with weights
-        def weighted_residual(params):
-            res = self.residual(params)
-            return res * self.weights
-
-        minimizer = Minimizer(weighted_residual, params)
-
-        # Le Bail Iteration Loop
-        print(f"Starting Le Bail refinement with {le_bail_cycles} cycles...")
-
-        for cycle in range(le_bail_cycles):
-            # Gradual Parameter Release Strategy
-
-            # Cycle 0-2: Fix Width to prevent collapse, Refine Lattice only
-            if cycle == 0:
-                params["U"].set(vary=False)
-                params["V"].set(vary=False)
-                params["W"].set(vary=False)
-                print("  -> Fixing Width parameters for initial lattice refinement")
-
-            if cycle == 3:
-                params["U"].set(vary=True)
-                params["V"].set(vary=True)
-                params["W"].set(vary=True)
-                print("  -> Releasing Width parameters")
-
-            if cycle == 5:
-                # Enable Zero Shift (and Displacement if applicable)
-                # Once lattice is roughly correct, we can allow small shifts
-                params["zero_shift"].set(vary=True)
-                print("  -> Enabling Zero Shift refinement")
-
-                # Enable Asymmetry
-                params["asymmetry"].set(vary=True)
-                print("  -> Enabling Asymmetry refinement")
-
-            if cycle == 10:
-                # Enable Displacement if enough peaks (heuristic)
-                # Even with few peaks, if we have high angle data, displacement is better than zero shift alone
-                if len(self.reflections) >= 3:
-                    params["displacement"].set(vary=True)
-                    print("  -> Enabling Displacement refinement")
-                else:
-                    print("  -> Skipping Displacement (too few reflections)")
-
-            # 1. Refine Geometry, Profile & Intensities (Pawley Fit)
-            # Since Intensities are free, we don't need the manual Le Bail extraction step.
-            # This avoids the instability of fixed-intensity profile refinement.
-            result = minimizer.minimize(
-                method="leastsq", params=params, max_nfev=max_nfev // le_bail_cycles
-            )
-            params = result.params
-
-            # 2. Extract Intensities (Skipped - using Pawley refinement)
-            # self._update_intensities(params)
-
-            print(f"Cycle {cycle + 1}/{le_bail_cycles}: Chi2 = {result.chisqr:.2f}")
-
-        # Final refinement
-        result = minimizer.minimize(method="leastsq", params=params, max_nfev=max_nfev)
-
-        # Calculate R-factors
-        y_calc = self.model(result.params)
-        if self.background_type == "spline" and hasattr(self, "bg_model"):
-            y_calc += self.bg_model.eval(result.params, x=self.x)
-
-        # R_wp (Weighted Profile R-factor)
-        # Numerator is essentially Chi2 (unreduced)
-        numerator_wp = np.sum((self.weights * (self.y - y_calc)) ** 2)
-        denominator_wp = np.sum((self.weights * self.y) ** 2)
-        r_wp = np.sqrt(numerator_wp / denominator_wp) * 100
-
-        # R_p (Profile R-factor)
-        numerator_p = np.sum(np.abs(self.y - y_calc))
-        denominator_p = np.sum(self.y)
-        r_p = (numerator_p / denominator_p) * 100
-
-        # R_exp (Expected R-factor)
-        # R_exp = sqrt( (N - P) / Sum(w * y_obs^2) )
-        # N = number of points, P = number of free parameters
-        n_free = result.nfree
-        r_exp = np.sqrt(n_free / denominator_wp) * 100
-
-        # Goodness of Fit (S)
-        gof = r_wp / r_exp
-
-        # Attach to result object
-        result.r_wp = r_wp
-        result.r_p = r_p
-        result.r_exp = r_exp
-        result.gof = gof
-
-        # Calculate Peak Residuals
-        result.peak_stats = self.get_peak_stats(result.params)
-
-        return result
-
     def get_peak_stats(self, params):
         """
         Calculate statistics for each peak: position, intensity, residual.
@@ -811,7 +546,7 @@ class LeBailFitter:
 
         return stats
 
-    def plot_result(self, result, save_path="data/Figure_1.png"):
+    def plot_result(self, result, save_path="data/wppf_result.png"):
         y_calc = self.model(result.params)
 
         if self.background_type == "spline" and hasattr(self, "bg_model"):
@@ -824,6 +559,6 @@ class LeBailFitter:
         plt.legend()
         plt.xlabel("2Theta")
         plt.ylabel("Intensity")
-        plt.title("Le Bail / Pawley Fit Result")
+        plt.title("Fit Result")
         plt.savefig(save_path)
         plt.close()

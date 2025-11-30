@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent / "src"))
 
 from ras_loader import load_ras_file
-from wppf.le_bail import LeBailFitter
+from wppf.pawley import PawleyFitter
 
 
 def main():
@@ -27,7 +27,7 @@ def main():
     print(f"Range: {x.min():.2f} - {x.max():.2f}")
 
     # Initialize Fitter
-    fitter = LeBailFitter(
+    fitter = PawleyFitter(
         x,
         y,
         cif_path,
@@ -38,8 +38,7 @@ def main():
 
     # Fit
     print("Starting Fit...")
-    # Le Bail method typically requires more cycles for intensity extraction to converge
-    result = fitter.fit(max_nfev=5000, cycles=50)
+    result = fitter.fit(max_nfev=2000)
 
     print("Fit Complete.")
     print(f"Chi2: {result.chisqr:.2f}")
@@ -90,7 +89,7 @@ def main():
             )
 
     # Plot
-    fitter.plot_result(result, save_path="data/le_bail_fit_result.png")
+    fitter.plot_result(result, save_path="data/pawley_fit_result.png")
 
 
 if __name__ == "__main__":
