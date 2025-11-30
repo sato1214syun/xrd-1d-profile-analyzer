@@ -32,14 +32,20 @@ class WPPFBase:
             Intensity values
         cif_path : str or Path
             Path to CIF file
-        wavelength : str
-            X-ray wavelength source (e.g. "CuKa1")
+        wavelength : str or float
+            X-ray wavelength source (e.g. "Cu2") or value in Angstrom
         """
         self.x = np.asarray(x)
         self.y = np.asarray(y)
         self.cif_path = Path(cif_path)
-        self.wavelength_name = wavelength
-        self.wavelength_val = xu.wavelength(wavelength)
+
+        if isinstance(wavelength, (float, int)):
+            self.wavelength_name = "Custom"
+            self.wavelength_val = float(wavelength)
+        else:
+            self.wavelength_name = wavelength
+            self.wavelength_val = xu.wavelength(wavelength)
+
         self.background_type = background_type
         self.num_knots = num_knots
 
@@ -313,6 +319,9 @@ class WPPFBase:
         # Increased bounds for zero_shift to handle larger offsets
         params.add("zero_shift", value=0.0, min=-0.5, max=0.5)
         params.add("displacement", value=0.0, min=-0.5, max=0.5, vary=False)
+        params.add("transparency", value=0.0, min=-0.5, max=0.5, vary=False)
+        params.add("axial_divergence", value=0.0, min=-0.5, max=0.5, vary=False)
+        params.add("error_quad", value=0.0, min=-1e-4, max=1e-4, vary=False)
 
         # Background
         if self.background_type == "linear":
@@ -383,6 +392,9 @@ class WPPFBase:
         asymmetry = params["asymmetry"].value
         zero = params["zero_shift"].value
         displacement = params["displacement"].value
+        transparency = params["transparency"].value
+        axial = params["axial_divergence"].value
+        error_quad = params["error_quad"].value
 
         y_calc = np.zeros_like(self.x)
 
@@ -423,10 +435,31 @@ class WPPFBase:
             # Apply Zero Shift and Displacement
             # Displacement shift: delta(2theta) = displacement * cos(theta)
             # Note: displacement parameter absorbs the -2s/R factor
+            # Transparency shift: delta(2theta) = transparency * sin(2theta)
+            # Axial Divergence shift: delta(2theta) = axial * cot(theta)
             theta_rad_orig = np.radians(two_theta_orig / 2.0)
             disp_shift = displacement * np.cos(theta_rad_orig)
+            transp_shift = transparency * np.sin(2 * theta_rad_orig)
 
-            two_theta = two_theta_orig + zero + disp_shift
+            # Avoid division by zero for cot(theta)
+            sin_theta = np.sin(theta_rad_orig)
+            if abs(sin_theta) > 1e-4:
+                axial_shift = axial * (np.cos(theta_rad_orig) / sin_theta)
+            else:
+                axial_shift = 0.0
+
+            # Quadratic error term: delta(2theta) = error_quad * (2theta)^2
+            # This accounts for instrumental non-linearity
+            quad_shift = error_quad * (two_theta_orig**2)
+
+            two_theta = (
+                two_theta_orig
+                + zero
+                + disp_shift
+                + transp_shift
+                + axial_shift
+                + quad_shift
+            )
 
             if two_theta < self.x.min() - 1 or two_theta > self.x.max() + 1:
                 continue
@@ -506,6 +539,9 @@ class WPPFBase:
         gamma = params["gamma"].value
         zero = params["zero_shift"].value
         displacement = params["displacement"].value
+        transparency = params["transparency"].value
+        axial = params["axial_divergence"].value
+        error_quad = params["error_quad"].value
 
         # Calculate full profile first
         y_calc = self.model(params)
@@ -520,8 +556,27 @@ class WPPFBase:
             # Calculate position
             two_theta_orig = self._calculate_2theta(hkl, a, b, c, alpha, beta, gamma)
             theta_rad_orig = np.radians(two_theta_orig / 2.0)
+
+            # Shifts
             disp_shift = displacement * np.cos(theta_rad_orig)
-            two_theta = two_theta_orig + zero + disp_shift
+            transp_shift = transparency * np.sin(2 * theta_rad_orig)
+
+            sin_theta = np.sin(theta_rad_orig)
+            if abs(sin_theta) > 1e-4:
+                axial_shift = axial * (np.cos(theta_rad_orig) / sin_theta)
+            else:
+                axial_shift = 0.0
+
+            quad_shift = error_quad * (two_theta_orig**2)
+
+            two_theta = (
+                two_theta_orig
+                + zero
+                + disp_shift
+                + transp_shift
+                + axial_shift
+                + quad_shift
+            )
 
             # Find nearest data point
             if two_theta < self.x.min() or two_theta > self.x.max():

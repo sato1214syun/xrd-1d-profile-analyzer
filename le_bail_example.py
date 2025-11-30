@@ -14,7 +14,7 @@ def main():
     cif_path = "data/cif/1538066.cif"  # NbTi
 
     print(f"Loading RAS: {ras_path}")
-    df = load_ras_file(ras_path)
+    df, wavelength = load_ras_file(ras_path)
     x = df["x"].to_numpy()
     y = df["cps"].to_numpy()
 
@@ -26,12 +26,18 @@ def main():
     print(f"Data points: {len(x)}")
     print(f"Range: {x.min():.2f} - {x.max():.2f}")
 
+    if wavelength:
+        print(f"Using wavelength from RAS: {wavelength} A")
+    else:
+        print("Using default wavelength: CuKa12")
+        wavelength = "CuKa12"
+
     # Initialize Fitter
     fitter = LeBailFitter(
         x,
         y,
         cif_path,
-        wavelength="CuKa12",
+        wavelength=wavelength,
         background_type="spline",
         num_knots=10,
     )

@@ -14,31 +14,37 @@ def main():
     cif_path = "data/cif/1538066.cif"  # NbTi
 
     print(f"Loading RAS: {ras_path}")
-    df = load_ras_file(ras_path)
+    df, wavelength = load_ras_file(ras_path)
     x = df["x"].to_numpy()
     y = df["cps"].to_numpy()
 
     # Limit range for speed/testing
-    mask = (x >= 30) & (x <= 90)
+    mask = (x >= 35) & (x <= 89.95)
     x = x[mask]
     y = y[mask]
 
     print(f"Data points: {len(x)}")
     print(f"Range: {x.min():.2f} - {x.max():.2f}")
 
+    if wavelength:
+        print(f"Using wavelength from RAS: {wavelength} A")
+    else:
+        print("Using default wavelength: CuKa12")
+        wavelength = "CuKa12"
+
     # Initialize Fitter
     fitter = PawleyFitter(
         x,
         y,
         cif_path,
-        wavelength="CuKa12",
+        wavelength=wavelength,
         background_type="spline",
         num_knots=10,
     )
 
     # Fit
     print("Starting Fit...")
-    result = fitter.fit(max_nfev=2000)
+    result = fitter.fit(max_nfev=2000, cycles=50)
 
     print("Fit Complete.")
     print(f"Chi2: {result.chisqr:.2f}")

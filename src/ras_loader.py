@@ -14,8 +14,10 @@ def load_ras_file(file_path):
 
     Returns
     -------
-    pl.DataFrame
-        x (2theta), counts, cps を含むDataFrame
+    tuple
+        (pl.DataFrame, float or None)
+        DataFrame: x (2theta), counts, cps を含むDataFrame
+        float: 波長 (A) または None
     """
     ras_path = Path(file_path)
     if not ras_path.exists():
@@ -37,4 +39,10 @@ def load_ras_file(file_path):
             (pl.col("counts") / step_width * scan_speed).alias("cps"),
         )
     )
-    return ras_df
+
+    # Extract wavelength if available
+    wavelength = None
+    if hasattr(ras_data.scan, "wave_length_alpha1"):
+        wavelength = ras_data.scan.wave_length_alpha1
+
+    return ras_df, wavelength

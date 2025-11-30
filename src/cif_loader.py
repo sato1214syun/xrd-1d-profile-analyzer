@@ -6,7 +6,7 @@ import xrayutilities as xu
 
 
 def get_theoretical_peaks_from_cif(
-    cif_path, wavelength="CuKa1", two_theta_range=(10, 90), min_intensity=0.01
+    cif_path, wavelength="CuKa12", two_theta_range=(10, 90), min_intensity=0.01
 ):
     """
     CIFファイルから理論的なXRDピーク位置と相対強度を取得
@@ -16,8 +16,8 @@ def get_theoretical_peaks_from_cif(
     cif_path : str or Path
         CIFファイルのパス
     wavelength : str or float, optional
-        X線波長。'CuKa1', 'CuKa2', 'CuKa'（平均）または波長値（Å）
-        デフォルト: 'CuKa1' (1.5406 Å)
+        X線波長。'CuKa1', 'CuKa2', 'CuKa12'または波長値（Å）
+        デフォルト: 'CuKa12' (1.5406 Å)
     two_theta_range : tuple, optional
         計算する2θ範囲 (min, max)
     min_intensity : float, optional
@@ -47,9 +47,9 @@ def get_theoretical_peaks_from_cif(
     elif wavelength == "CuKa2":
         wl = xu.wavelength("CuKa2")  # 1.5444 Å
         en = xu.utilities.energy("CuKa2")
-    elif wavelength == "CuKa":
-        wl = xu.wavelength("CuKa")  # 加重平均
-        en = xu.utilities.energy("CuKa")
+    elif wavelength == "CuKa12":
+        wl = xu.wavelength("CuKa12")  # 加重平均
+        en = xu.utilities.energy("CuKa12")
     else:
         wl = float(wavelength)
         en = xu.utilities.energy(wl)

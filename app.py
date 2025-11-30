@@ -47,9 +47,33 @@ def main():
 
         try:
             # Load Data
-            df = load_ras_file(tmp_path)
-            x = df["x"].to_numpy()
-            y = df["cps"].to_numpy()  # Using cps for fitting
+            df, wavelength = load_ras_file(tmp_path)
+            x_raw = df["x"].to_numpy()
+            y_raw = df["cps"].to_numpy()  # Using cps for fitting
+
+            if wavelength:
+                st.sidebar.info(f"Wavelength detected from RAS: {wavelength:.5f} A")
+            else:
+                st.sidebar.warning(
+                    "Wavelength not found in RAS. Using default CuKa12 (1.5418 A)"
+                )
+                wavelength = 1.5418  # Default CuKa12
+
+            # Range Selection
+            st.sidebar.subheader("Data Range")
+            min_x, max_x = float(x_raw.min()), float(x_raw.max())
+            range_min, range_max = st.sidebar.slider(
+                "Fitting Range (2Theta)",
+                min_value=min_x,
+                max_value=max_x,
+                value=(35.0, 89.95) if max_x > 89.95 else (min_x, max_x),
+                step=0.01,
+            )
+
+            # Apply Mask
+            mask = (x_raw >= range_min) & (x_raw <= range_max)
+            x = x_raw[mask]
+            y = y_raw[mask]
 
             # 2. Peak Fitting
             st.subheader("Peak Fitting Analysis")
@@ -74,7 +98,7 @@ def main():
                     y=y,
                     mode="markers",
                     name="Observed",
-                    marker=dict(size=3, color="black", opacity=0.5),
+                    marker=dict(size=3, opacity=0.5),  # Removed explicit black color
                 )
             )
 
@@ -98,7 +122,9 @@ def main():
                         y=comps["background"],
                         mode="lines",
                         name="Background",
-                        line=dict(color="blue", dash="dash"),
+                        line=dict(
+                            color="green", dash="dash"
+                        ),  # Changed to green to distinguish from default blue
                     )
                 )
 
@@ -161,7 +187,7 @@ def main():
 
             with col1:
                 method = st.radio("Fitting Method", ["Pawley", "Le Bail"])
-                cycles = st.number_input("Cycles", min_value=1, max_value=100, value=20)
+                cycles = st.number_input("Cycles", min_value=1, max_value=200, value=50)
 
             with col2:
                 st.write(f"**Selected Crystal Structure:** {selected_cif_path.name}")
@@ -169,7 +195,7 @@ def main():
 
             # 5. WPPF Execution & Results
             if run_wppf:
-                run_wppf_analysis(x, y, selected_cif_path, method, cycles)
+                run_wppf_analysis(x, y, selected_cif_path, method, cycles, wavelength)
 
         finally:
             # Cleanup temp file
@@ -178,8 +204,9 @@ def main():
 
 
 @st.dialog("WPPF Results", width="large")
-def run_wppf_analysis(x, y, cif_path, method, cycles):
+def run_wppf_analysis(x, y, cif_path, method, cycles, wavelength):
     st.write(f"Running {method} refinement on {cif_path.name}...")
+    st.write(f"Using Wavelength: {wavelength:.5f} A")
 
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -187,16 +214,31 @@ def run_wppf_analysis(x, y, cif_path, method, cycles):
     try:
         # Instantiate Fitter
         if method == "Pawley":
-            fitter = PawleyFitter(x, y, cif_path=cif_path)
+            fitter = PawleyFitter(
+                x,
+                y,
+                cif_path=cif_path,
+                wavelength=wavelength,
+                background_type="spline",
+                num_knots=10,
+            )
         else:
-            fitter = LeBailFitter(x, y, cif_path=cif_path)
+            fitter = LeBailFitter(
+                x,
+                y,
+                cif_path=cif_path,
+                wavelength=wavelength,
+                background_type="spline",
+                num_knots=10,
+            )
 
         status_text.text("Fitting in progress...")
 
         # Run Fit
         # Note: The current fit() method doesn't support a progress callback easily
         # without modifying the class, so we just run it.
-        result = fitter.fit(cycles=cycles)
+        # Increased max_nfev to match script
+        result = fitter.fit(cycles=cycles, max_nfev=2000)
 
         progress_bar.progress(100)
         status_text.text("Fitting Complete!")
@@ -261,7 +303,7 @@ def run_wppf_analysis(x, y, cif_path, method, cycles):
                 y=y,
                 mode="markers",
                 name="Observed",
-                marker=dict(size=2, color="black"),
+                marker=dict(size=2),  # Removed explicit black color
             )
         )
         fig_wppf.add_trace(

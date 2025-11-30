@@ -57,6 +57,9 @@ class LeBailFitter(WPPFBase):
         asymmetry = params["asymmetry"].value
         zero = params["zero_shift"].value
         displacement = params["displacement"].value
+        transparency = params["transparency"].value
+        axial = params["axial_divergence"].value
+        error_quad = params["error_quad"].value
 
         for i, ref in enumerate(self.reflections):
             old_intensity = params[f"I_{i}"].value
@@ -64,8 +67,26 @@ class LeBailFitter(WPPFBase):
 
             two_theta_orig = self._calculate_2theta(hkl, a, b, c, alpha, beta, gamma)
             theta_rad_orig = np.radians(two_theta_orig / 2.0)
+
             disp_shift = displacement * np.cos(theta_rad_orig)
-            two_theta = two_theta_orig + zero + disp_shift
+            transp_shift = transparency * np.sin(2 * theta_rad_orig)
+
+            sin_theta = np.sin(theta_rad_orig)
+            if abs(sin_theta) > 1e-4:
+                axial_shift = axial * (np.cos(theta_rad_orig) / sin_theta)
+            else:
+                axial_shift = 0.0
+
+            quad_shift = error_quad * (two_theta_orig**2)
+
+            two_theta = (
+                two_theta_orig
+                + zero
+                + disp_shift
+                + transp_shift
+                + axial_shift
+                + quad_shift
+            )
 
             if two_theta < self.x.min() - 1 or two_theta > self.x.max() + 1:
                 continue
@@ -138,6 +159,9 @@ class LeBailFitter(WPPFBase):
 
         params["zero_shift"].set(vary=False, value=0.0)
         params["displacement"].set(vary=False, value=0.0)
+        params["transparency"].set(vary=False, value=0.0)
+        params["axial_divergence"].set(vary=False, value=0.0)
+        params["error_quad"].set(vary=False, value=0.0)
 
         weights = 1.0 / np.sqrt(np.maximum(self.y, 1.0))
 
@@ -185,11 +209,22 @@ class LeBailFitter(WPPFBase):
                 print("  -> Enabling Asymmetry refinement")
 
             if cycle == 10:
-                if len(self.reflections) >= 3:
+                # Increased threshold to 6 to prevent correlation with Zero Shift when peaks are few
+                if len(self.reflections) >= 6:
                     params["displacement"].set(vary=True)
                     print("  -> Enabling Displacement refinement")
                 else:
                     print("  -> Skipping Displacement (too few reflections)")
+
+            # if cycle == 15:
+            #     params["transparency"].set(vary=True)
+            #     print("  -> Enabling Transparency refinement")
+            #     params["axial_divergence"].set(vary=True)
+            #     print("  -> Enabling Axial Divergence refinement")
+
+            # if cycle == 20:
+            #     params["error_quad"].set(vary=True)
+            #     print("  -> Enabling Quadratic Error refinement")
 
             # 1. Refine Geometry & Profile (Intensities Fixed)
             result = minimizer.minimize(
@@ -204,6 +239,16 @@ class LeBailFitter(WPPFBase):
 
         # Final refinement
         result = minimizer.minimize(method="leastsq", params=params, max_nfev=max_nfev)
+
+        # Check for high correlations
+        print("\n--- Parameter Correlations (> 0.8) ---")
+        for i, p1 in enumerate(result.params):
+            for p2 in list(result.params)[i + 1 :]:
+                if result.params[p1].correl and p2 in result.params[p1].correl:
+                    corr = result.params[p1].correl[p2]
+                    if abs(corr) > 0.8:
+                        print(f"{p1} vs {p2}: {corr:.4f}")
+        print("--------------------------------------\n")
 
         # Calculate R-factors
         y_calc = self.model(result.params)

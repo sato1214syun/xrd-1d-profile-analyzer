@@ -12,6 +12,9 @@ class PawleyFitter(WPPFBase):
         # Initial Strategy: Fix Zero Shift and Displacement to ensure Lattice Parameter converges first
         params["zero_shift"].set(vary=False, value=0.0)
         params["displacement"].set(vary=False, value=0.0)
+        params["transparency"].set(vary=False, value=0.0)
+        params["axial_divergence"].set(vary=False, value=0.0)
+        params["error_quad"].set(vary=False, value=0.0)
 
         # Weights: 1/sqrt(y) (Poisson statistics)
         weights = 1.0 / np.sqrt(np.maximum(self.y, 1.0))
@@ -59,11 +62,22 @@ class PawleyFitter(WPPFBase):
                 print("  -> Enabling Asymmetry refinement")
 
             if cycle == 10:
-                if len(self.reflections) >= 3:
+                # Increased threshold to 6 to prevent correlation with Zero Shift when peaks are few
+                if len(self.reflections) >= 6:
                     params["displacement"].set(vary=True)
                     print("  -> Enabling Displacement refinement")
                 else:
                     print("  -> Skipping Displacement (too few reflections)")
+
+            # if cycle == 15:
+            #     params["transparency"].set(vary=True)
+            #     print("  -> Enabling Transparency refinement")
+            #     params["axial_divergence"].set(vary=True)
+            #     print("  -> Enabling Axial Divergence refinement")
+
+            # if cycle == 20:
+            #     params["error_quad"].set(vary=True)
+            #     print("  -> Enabling Quadratic Error refinement")
 
             # Pawley Fit: Intensities are free parameters
             result = minimizer.minimize(
@@ -74,7 +88,18 @@ class PawleyFitter(WPPFBase):
             print(f"Cycle {cycle + 1}/{cycles}: Chi2 = {result.chisqr:.2f}")
 
         # Final refinement
+        # Calculate covariance matrix to get standard errors
         result = minimizer.minimize(method="leastsq", params=params, max_nfev=max_nfev)
+
+        # Check for high correlations
+        print("\n--- Parameter Correlations (> 0.8) ---")
+        for i, p1 in enumerate(result.params):
+            for p2 in list(result.params)[i + 1 :]:
+                if result.params[p1].correl and p2 in result.params[p1].correl:
+                    corr = result.params[p1].correl[p2]
+                    if abs(corr) > 0.8:
+                        print(f"{p1} vs {p2}: {corr:.4f}")
+        print("--------------------------------------\n")
 
         # Calculate R-factors
         y_calc = self.model(result.params)
