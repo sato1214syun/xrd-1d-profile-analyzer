@@ -1,11 +1,11 @@
-import numpy as np
-import polars as pl
 from pathlib import Path
-import xrayutilities as xu
-from lmfit import Parameters, Minimizer, report_fit
-from lmfit.models import PseudoVoigtModel, LinearModel, SplineModel
+
 import matplotlib.pyplot as plt
-from peak_fitting import SplitPseudoVoigtModel
+import numpy as np
+import xrayutilities as xu
+from lmfit import Minimizer, Parameters
+from lmfit.models import SplineModel
+
 
 
 class LeBailFitter:
@@ -54,42 +54,109 @@ class LeBailFitter:
         self.reflections = self._generate_reflections()
         print(f"Generated {len(self.reflections)} unique reflections.")
 
-        # Estimate Lattice Parameter from Strongest Peak (Cubic only for now)
-        if self.lattice.crystal_system.lower() == "cubic":
-            self._estimate_cubic_lattice()
+        # Estimate Lattice Parameter from Strongest Peak (Generic)
+        self._estimate_lattice_from_strongest_peak()
 
-    def _estimate_cubic_lattice(self):
-        """Estimate cubic lattice parameter 'a' from the strongest observed peak."""
-        # Find 2theta of max intensity
+    def _estimate_lattice_from_strongest_peak(self):
+        """
+        Estimate lattice parameters by matching the strongest observed peak
+        to the strongest theoretical reflection.
+        Scales the unit cell isotropically.
+        """
+        # 1. Find strongest observed peak
         idx_max = np.argmax(self.y)
         two_theta_max = self.x[idx_max]
+        theta_rad_max = np.radians(two_theta_max / 2)
+        d_obs = self.wavelength_val / (2 * np.sin(theta_rad_max))
 
-        # Assume strongest peak is (110) for BCC (Im-3m)
-        # Check space group or just assume (110) as it's usually the first strong one
-        # For NbTi (Im-3m), (110) is the first allowed reflection.
+        print(f"Strongest observed peak at {two_theta_max:.2f} deg (d={d_obs:.4f} A)")
 
-        # Calculate d-spacing
-        # lambda = 2d sin(theta) -> d = lambda / (2 sin(theta))
-        theta_rad = np.radians(two_theta_max / 2)
-        d_spacing = self.wavelength_val / (2 * np.sin(theta_rad))
+        # 2. Calculate theoretical intensities to find strongest reflection
+        # Use a simplified approach: F^2 * LP * Multiplicity
 
-        # For (110): d = a / sqrt(1^2 + 1^2 + 0^2) = a / sqrt(2)
-        # a = d * sqrt(2)
-        a_est = d_spacing * np.sqrt(2)
+        # Calculate max Q for the whole range
+        q_min = 4 * np.pi / self.wavelength_val * np.sin(np.radians(self.x.min() / 2))
+        q_max = 4 * np.pi / self.wavelength_val * np.sin(np.radians(self.x.max() / 2))
+
+        # Get all allowed HKLs in range
+        hkls = list(self.lattice.get_allowed_hkl(q_max))
+
+        # Filter by q_min
+        valid_hkls = []
+        for hkl in hkls:
+            q = self.lattice.GetQ(hkl)
+            q_mag = np.linalg.norm(q)
+            if q_mag >= q_min:
+                valid_hkls.append((hkl, q_mag))
+
+        if not valid_hkls:
+            print(
+                "Warning: No allowed reflections in the measured range. Skipping estimation."
+            )
+            return
+
+        # Calculate Intensity for each
+        # Energy in eV for Structure Factor
+        en = 12398.4 / self.wavelength_val
+
+        # Group by d-spacing (or Q) to handle multiplicity
+        # Key: d_spacing (rounded), Value: sum of intensity
+        grouped_intensities = {}
+
+        for hkl, q_mag in valid_hkls:
+            # Structure Factor
+            F = self.crystal.StructureFactor(self.lattice.GetQ(hkl), en=en)
+            F_sq = np.abs(F) ** 2
+
+            # LP Factor
+            # sin(theta) = q * lambda / 4pi
+            sin_theta = q_mag * self.wavelength_val / (4 * np.pi)
+            theta = np.arcsin(sin_theta)
+            cos_theta = np.cos(theta)
+            cos_2theta = np.cos(2 * theta)
+
+            # Standard LP factor for unpolarized beam
+            lp = (1 + cos_2theta**2) / (sin_theta**2 * cos_theta)
+
+            intensity = F_sq * lp
+
+            # Grouping
+            d = 2 * np.pi / q_mag
+            d_key = round(d, 4)
+
+            if d_key not in grouped_intensities:
+                grouped_intensities[d_key] = {"intensity": 0.0, "hkl": hkl, "d": d}
+
+            grouped_intensities[d_key]["intensity"] += intensity
+
+        # Find max theoretical intensity
+        best_group = max(grouped_intensities.values(), key=lambda x: x["intensity"])
+        best_hkl = best_group["hkl"]
+        best_d_calc = best_group["d"]
 
         print(
-            f"Estimated lattice parameter 'a' from max peak at {two_theta_max:.2f} deg: {a_est:.4f} A"
+            f"Strongest theoretical reflection: {best_hkl} (d_calc={best_d_calc:.4f} A)"
         )
 
-        # Update lattice object
-        # For cubic, setting 'a' automatically updates 'b' and 'c' if they are constrained
-        self.lattice.a = a_est
-        # self.lattice.b = a_est # Error: b is not free
-        # self.lattice.c = a_est # Error: c is not free
+        # 3. Scale Lattice
+        # We assume the relative lattice parameters are correct, just scaled wrong.
+        scale_factor = d_obs / best_d_calc
+        print(f"Scaling lattice parameters by factor: {scale_factor:.5f}")
 
-        # Re-generate reflections because Q might change significantly?
-        # Actually, indices don't change for cubic, but Q values do.
-        # We should re-generate to be safe, especially if ordering changes (unlikely for cubic).
+        self.lattice.a *= scale_factor
+
+        # Only set b and c if they are free parameters (e.g. not constrained by symmetry)
+        try:
+            self.lattice.b *= scale_factor
+        except RuntimeError:
+            pass
+
+        try:
+            self.lattice.c *= scale_factor
+        except RuntimeError:
+            pass
+
+        # Re-generate reflections with new lattice
         self.reflections = self._generate_reflections()
 
     def _generate_reflections(self):
@@ -161,7 +228,7 @@ class LeBailFitter:
         except np.linalg.LinAlgError:
             return 0.0  # Invalid lattice
 
-        h, k, l = hkl
+        h, k, l = hkl  # noqa: E741
         hkl_vec = np.array([h, k, l])
 
         # 1/d^2 = hkl . G* . hkl
@@ -178,7 +245,7 @@ class LeBailFitter:
 
         # Check domain
         if sin_theta > 1.0:
-            return 180.0  # Unphysical
+            return 180.0  # Peak is outside the measurable 2theta range (sin(theta) > 1)
 
         theta = np.arcsin(sin_theta)
         return np.degrees(2 * theta)
@@ -595,7 +662,7 @@ class LeBailFitter:
             res = self.residual(params)
             return res * self.weights
 
-        minner = Minimizer(weighted_residual, params)
+        minimizer = Minimizer(weighted_residual, params)
 
         # Le Bail Iteration Loop
         print(f"Starting Le Bail refinement with {le_bail_cycles} cycles...")
@@ -638,7 +705,7 @@ class LeBailFitter:
             # 1. Refine Geometry, Profile & Intensities (Pawley Fit)
             # Since Intensities are free, we don't need the manual Le Bail extraction step.
             # This avoids the instability of fixed-intensity profile refinement.
-            result = minner.minimize(
+            result = minimizer.minimize(
                 method="leastsq", params=params, max_nfev=max_nfev // le_bail_cycles
             )
             params = result.params
@@ -649,7 +716,7 @@ class LeBailFitter:
             print(f"Cycle {cycle + 1}/{le_bail_cycles}: Chi2 = {result.chisqr:.2f}")
 
         # Final refinement
-        result = minner.minimize(method="leastsq", params=params, max_nfev=max_nfev)
+        result = minimizer.minimize(method="leastsq", params=params, max_nfev=max_nfev)
 
         # Calculate R-factors
         y_calc = self.model(result.params)
