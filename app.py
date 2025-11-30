@@ -75,6 +75,18 @@ def main():
             x = x_raw[mask]
             y = y_raw[mask]
 
+            # Peak Detection Settings
+            st.sidebar.subheader("Peak Detection Settings")
+            num_knots = st.sidebar.number_input(
+                "Background Knots", min_value=5, max_value=50, value=10
+            )
+            peak_width = st.sidebar.number_input(
+                "Min Peak Width", min_value=1, max_value=20, value=3
+            )
+            peak_distance = st.sidebar.number_input(
+                "Min Peak Distance", min_value=1, max_value=50, value=10
+            )
+
             # 2. Peak Fitting
             st.subheader("Peak Fitting Analysis")
 
@@ -85,7 +97,9 @@ def main():
                     y,
                     model_class=SplitPseudoVoigtModel,
                     background_type="spline",
-                    num_knots=20,
+                    num_knots=num_knots,
+                    width=peak_width,
+                    distance=peak_distance,
                 )
 
             # 3. Plotly Visualization
@@ -142,10 +156,6 @@ def main():
             st.markdown("### Peak Parameters")
             peak_params = []
 
-            # Parse lmfit parameters to extract peak info
-            # Assuming prefix format like "p0_", "p1_" etc.
-            # We look for 'center', 'fwhm', 'height' (or amplitude)
-
             # Group parameters by prefix
             prefixes = set()
             for name in result.params:
@@ -157,21 +167,47 @@ def main():
             sorted_prefixes = sorted(list(prefixes), key=lambda p: int(p[1:]))
 
             for prefix in sorted_prefixes:
-                center = result.params.get(f"{prefix}_center")
-                fwhm = result.params.get(f"{prefix}_fwhm")
-                height = result.params.get(f"{prefix}_height")
-                amplitude = result.params.get(f"{prefix}_amplitude")
+                # Helper to get value and stderr safely
+                def get_val_err(name):
+                    full_name = f"{prefix}_{name}"
+                    if full_name in result.params:
+                        param = result.params[full_name]
+                        val = param.value
+                        err = param.stderr if param.stderr is not None else 0.0
+                        return val, err
+                    return None, None
 
-                if center:
-                    peak_params.append(
-                        {
-                            "Peak ID": prefix,
-                            "Center (deg)": center.value,
-                            "FWHM (deg)": fwhm.value if fwhm else np.nan,
-                            "Height": height.value if height else np.nan,
-                            "Amplitude": amplitude.value if amplitude else np.nan,
-                        }
-                    )
+                center, center_err = get_val_err("center")
+                amplitude, amplitude_err = get_val_err("amplitude")
+                fwhm, fwhm_err = get_val_err("fwhm")
+                fraction, fraction_err = get_val_err("fraction")
+                sigma_l, sigma_l_err = get_val_err("sigma_l")
+                sigma_r, sigma_r_err = get_val_err("sigma_r")
+
+                # Calculate FWHM if missing
+                if fwhm is None and sigma_l is not None and sigma_r is not None:
+                    fwhm = sigma_l + sigma_r
+                    if sigma_l_err is not None and sigma_r_err is not None:
+                        fwhm_err = np.sqrt(sigma_l_err**2 + sigma_r_err**2)
+                    else:
+                        fwhm_err = None
+
+                peak_params.append(
+                    {
+                        "center[deg]": center,
+                        "center_σ[deg]": center_err,
+                        "amplitude[cps]": amplitude,
+                        "amplitude_σ[cps]": amplitude_err,
+                        "fwmh[deg]": fwhm,
+                        "fwmh_σ[deg]": fwhm_err,
+                        "fraction": fraction,
+                        "fraction_σ": fraction_err,
+                        "sigma_l": sigma_l,
+                        "sigma_l_σ": sigma_l_err,
+                        "sigma_r": sigma_r,
+                        "sigma_r_σ": sigma_r_err,
+                    }
+                )
 
             if peak_params:
                 df_peaks = pl.DataFrame(peak_params)
