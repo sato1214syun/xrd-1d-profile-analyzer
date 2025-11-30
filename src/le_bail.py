@@ -227,9 +227,9 @@ class LeBailFitter:
         # Relaxed constraints and larger initial values
         # Increased initial W to ensure peak overlap during initial refinement
         # Reduced max U to prevent excessive broadening at high angles
-        params.add("U", value=0.1, min=0.0, max=0.5)
-        params.add("V", value=0.0, min=-1.0, max=1.0)
-        params.add("W", value=0.5, min=0.001, max=2.0)
+        params.add("U", value=0.1, min=0.0, max=5.0)
+        params.add("V", value=0.0, min=-2.0, max=2.0)
+        params.add("W", value=0.5, min=0.001, max=5.0)
 
         # Peak Shape (Pseudo-Voigt mixing)
         # eta = eta_0 + eta_1 * 2theta
@@ -286,8 +286,9 @@ class LeBailFitter:
             if estimated_I < max_intensity * 0.01:
                 estimated_I = max_intensity * 0.01
 
-            # Set initial value. Note: I_i is peak height in our model, so this is a good guess.
-            params.add(f"I_{i}", value=estimated_I, min=0.0, vary=False)
+            # Set initial value. Note: I_i is peak height in our model.
+            # We allow intensity to vary (Pawley fit) to ensure stability and convergence.
+            params.add(f"I_{i}", value=estimated_I, min=0.0, vary=True)
 
         return params
 
@@ -527,12 +528,21 @@ class LeBailFitter:
             L = 1.0 / (1.0 + (dx_masked / sigma_vec) ** 2)
             peak_shape = eta * L + (1 - eta) * G
 
-            # sum_term is the extracted "Area" (sum of counts) for this peak
+            # Le Bail Extraction Formula
+            # I_new = Sum_i [ (y_obs(i) - y_bkg(i)) * (y_calc_k(i) / y_calc_peaks_total(i)) ]
+            # Here, y_calc_k(i) = old_intensity * peak_shape(i)
+            # So, I_new = old_intensity * Sum_i [ peak_shape(i) * ratio(i) ]
+
+            # This I_new is the "Integrated Intensity" (Area) of the peak.
+            # However, our model parameter I_i is defined as the "Peak Height" (scaling factor of peak_shape).
+            # So we need to convert the extracted Area back to Height.
+
             sum_term = np.sum(ratio[mask] * peak_shape)
             extracted_area = old_intensity * sum_term
 
-            # Convert Area to Height (which is the parameter I_i)
-            # Height = Area / Sum(Shape)
+            # Convert Area to Height
+            # Area = Height * Integral(peak_shape)
+            # Height = Area / Integral(peak_shape)
             shape_integral = np.sum(peak_shape)
 
             if shape_integral > 1e-9:
@@ -540,12 +550,18 @@ class LeBailFitter:
             else:
                 new_intensity = 0.0
 
+            # Damping factor to prevent oscillation
+            # I_updated = alpha * I_new + (1 - alpha) * I_old
+            # Reduced alpha to 0.5 to stabilize intensity extraction
+            alpha = 0.5
+            new_intensity = alpha * new_intensity + (1 - alpha) * old_intensity
+
             # Update parameter
             if new_intensity < 0:
                 new_intensity = 0
             params[f"I_{i}"].value = new_intensity
 
-    def fit(self, max_nfev=1000, le_bail_cycles=20):
+    def fit(self, max_nfev=1000, le_bail_cycles=50):
         params = self.make_params()
 
         # Initial Strategy: Fix Zero Shift and Displacement to ensure Lattice Parameter converges first
@@ -619,14 +635,16 @@ class LeBailFitter:
                 else:
                     print("  -> Skipping Displacement (too few reflections)")
 
-            # 1. Refine Geometry & Profile (Intensities Fixed)
+            # 1. Refine Geometry, Profile & Intensities (Pawley Fit)
+            # Since Intensities are free, we don't need the manual Le Bail extraction step.
+            # This avoids the instability of fixed-intensity profile refinement.
             result = minner.minimize(
                 method="leastsq", params=params, max_nfev=max_nfev // le_bail_cycles
             )
             params = result.params
 
-            # 2. Extract Intensities
-            self._update_intensities(params)
+            # 2. Extract Intensities (Skipped - using Pawley refinement)
+            # self._update_intensities(params)
 
             print(f"Cycle {cycle + 1}/{le_bail_cycles}: Chi2 = {result.chisqr:.2f}")
 
@@ -664,7 +682,62 @@ class LeBailFitter:
         result.r_exp = r_exp
         result.gof = gof
 
+        # Calculate Peak Residuals
+        result.peak_stats = self.get_peak_stats(result.params)
+
         return result
+
+    def get_peak_stats(self, params):
+        """
+        Calculate statistics for each peak: position, intensity, residual.
+        """
+        a = params["a"].value
+        b = params["b"].value
+        c = params["c"].value
+        alpha = params["alpha"].value
+        beta = params["beta"].value
+        gamma = params["gamma"].value
+        zero = params["zero_shift"].value
+        displacement = params["displacement"].value
+
+        # Calculate full profile first
+        y_calc = self.model(params)
+        if self.background_type == "spline" and hasattr(self, "bg_model"):
+            y_calc += self.bg_model.eval(params, x=self.x)
+
+        stats = []
+
+        for i, ref in enumerate(self.reflections):
+            hkl = ref["hkl_rep"]
+
+            # Calculate position
+            two_theta_orig = self._calculate_2theta(hkl, a, b, c, alpha, beta, gamma)
+            theta_rad_orig = np.radians(two_theta_orig / 2.0)
+            disp_shift = displacement * np.cos(theta_rad_orig)
+            two_theta = two_theta_orig + zero + disp_shift
+
+            # Find nearest data point
+            if two_theta < self.x.min() or two_theta > self.x.max():
+                continue
+
+            idx = (np.abs(self.x - two_theta)).argmin()
+            y_obs_val = self.y[idx]
+            y_calc_val = y_calc[idx]
+            resid = y_obs_val - y_calc_val
+            rel_resid = resid / y_obs_val * 100 if y_obs_val > 1e-3 else 0.0
+
+            stats.append(
+                {
+                    "hkl": hkl,
+                    "2theta": two_theta,
+                    "y_obs": y_obs_val,
+                    "y_calc": y_calc_val,
+                    "residual": resid,
+                    "rel_residual_percent": rel_resid,
+                }
+            )
+
+        return stats
 
     def plot_result(self, result, save_path="data/Figure_1.png"):
         y_calc = self.model(result.params)
